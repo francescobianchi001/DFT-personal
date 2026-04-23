@@ -6,12 +6,65 @@ from scipy.integrate import simpson
 from scipy.optimize import brentq
 from scipy.integrate import cumulative_trapezoid
 from scipy.interpolate import splrep, splev
-import scipy as sy
-import matplotlib.pyplot as plt
 import math as mt
+from numba import njit
 from hydrogenicatom import HydrogenicAtom
-import sys
 import copy
+
+
+@njit
+def _numerov_propagate(g, radial_grid, e, l):
+    """Numba-compiled Numerov propagation (forward + backward + matching)."""
+    N = len(radial_grid)
+    h = radial_grid[1] - radial_grid[0]
+    c1 = 5.0 * h**2 / 12.0
+    c2 = h**2 / 12.0
+    sqrt_neg2e = np.sqrt(-2.0 * e)
+    y_right = np.zeros(N)
+    y_right[N-1] = np.exp(-sqrt_neg2e * radial_grid[N-1])
+    y_right[N-2] = np.exp(-sqrt_neg2e * radial_grid[N-2])
+    y_left = np.zeros(N)
+    y_left[0] = radial_grid[0]**(l + 1)
+    y_left[1] = radial_grid[1]**(l + 1)
+    # Find turning point
+    tp = 0
+    last_pos = -1
+    for i in range(N):
+        if g[i] > 0:
+            last_pos = i
+    if last_pos >= 0:
+        tp = min(last_pos + 1, N - 3)
+    else:
+        for i in range(N):
+            if g[i] <= 0:
+                tp = i
+                break
+    # Forward propagation
+    for n in range(2, tp + 2):
+        den = 1.0 / (1.0 + c2 * g[n])
+        num = 2.0 * y_left[n-1] * (1.0 - c1 * g[n-1]) - y_left[n-2] * (1.0 + c2 * g[n-2])
+        y_left[n] = num * den
+    # Backward propagation
+    for n in range(N - 3, tp - 2, -1):
+        den = 1.0 / (1.0 + c2 * g[n])
+        num = 2.0 * y_right[n+1] * (1.0 - c1 * g[n+1]) - y_right[n+2] * (1.0 + c2 * g[n+2])
+        y_right[n] = num * den
+    # Match at turning point
+    if y_left[tp] * y_right[tp] < 0:
+        for i in range(N):
+            y_right[i] = -y_right[i]
+    scale = y_right[tp] / y_left[tp]
+    for i in range(N):
+        y_left[i] = y_left[i] * scale
+    # Build full wavefunction
+    Y = np.empty(N)
+    for i in range(tp):
+        Y[i] = y_left[i]
+    for i in range(tp, N):
+        Y[i] = y_right[i]
+    dL = y_left[tp+1] - y_left[tp-1]
+    dR = y_right[tp+1] - y_right[tp-1]
+    return Y, dL, dR, tp
 
 class AtomicDFT:
 
@@ -161,10 +214,9 @@ class AtomicDFT:
 
     def getHartreePotential(self, rho):
         r = self.radial_grid
-        inner = np.zeros_like(r); outer = np.zeros_like(r)
-        for i in range(len(r)):
-            inner[i] = simpson(rho[:i+1] * r[:i+1]**2, r[:i+1])
-            outer[i] = simpson(rho[i:] * r[i:], r[i:])
+        inner = cumulative_trapezoid(rho * r**2, r, initial=0)
+        outer_cumul = cumulative_trapezoid(rho * r, r, initial=0)
+        outer = outer_cumul[-1] - outer_cumul
         Vh = 4 * np.pi * (inner / r + outer)
         Vh[0] = Vh[1]
         return Vh
@@ -192,7 +244,7 @@ class AtomicDFT:
         return eigenvalue, WF
 
     def getBracketEnergy(self, E_start, Veff, n, l):
-        delta = max(0.01 * abs(E_start), 0.05)
+        delta = max(0.001 * abs(E_start), 0.01)
         target_nodes = n - l - 1
         e1 = E_start
         WF, F1 = self.getWaveFunction_numerov(e1, l, Veff)
@@ -217,35 +269,13 @@ class AtomicDFT:
 
     def getWaveFunction_numerov(self, e, l, Veff):
         h = self.radial_grid[1] - self.radial_grid[0]
-        g = 2 * (e - Veff); c1 = 5 * h**2 / 12; c2 = h**2 / 12
-        y_right = np.zeros_like(self.radial_grid)
-        y_right[-1] = np.exp(-np.sqrt(-2 * e) * self.radial_grid[-1])
-        y_right[-2] = np.exp(-np.sqrt(-2 * e) * self.radial_grid[-2])
-        y_left = np.zeros_like(self.radial_grid)
-        y_left[0] = self.radial_grid[0]**(l + 1)
-        y_left[1] = self.radial_grid[1]**(l + 1)
-        positive_indices = np.where(g > 0)[0]
-        if len(positive_indices) > 0:
-            tp = min(positive_indices[-1] + 1, len(g) - 3)
-        else:
-            tp = np.argmax(g <= 0)
-        for n in range(2, tp + 2):
-            den = 1 / (1 + c2 * g[n])
-            num = 2 * y_left[n-1] * (1 - c1 * g[n-1]) - y_left[n-2] * (1 + c2 * g[n-2])
-            y_left[n] = num * den
-        for n in range(len(g) - 3, tp - 2, -1):
-            den = 1 / (1 + c2 * g[n])
-            num = 2 * y_right[n+1] * (1 - c1 * g[n+1]) - y_right[n+2] * (1 + c2 * g[n+2])
-            y_right[n] = num * den
-        if y_left[tp] * y_right[tp] < 0: y_right = -y_right
-        scale = y_right[tp] / y_left[tp]
-        y_left = y_left * scale
-        Y = np.concatenate((y_left[:tp], y_right[tp:]))
+        g = 2.0 * (e - Veff)
+        Y, dL, dR, tp = _numerov_propagate(g, self.radial_grid, e, l)
         norm = simpson(Y**2, x=self.radial_grid)
         y = Y / np.sqrt(norm)
-        dL = y_left[tp+1] - y_left[tp-1]; dR = y_right[tp+1] - y_right[tp-1]
-        F = 1 / np.sqrt(norm) * (dL - dR) / (2 * h)
-        if self.CONTROLL: print(f"DEBUG: tp={tp}, E_{l}={e}, F={F}")
+        F = 1.0 / np.sqrt(norm) * (dL - dR) / (2.0 * h)
+        if self.CONTROLL:
+            print(f"DEBUG: tp={tp}, E_{l}={e}, F={F}")
         self.tp = tp
         return y, F
 
