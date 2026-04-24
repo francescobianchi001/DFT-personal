@@ -253,7 +253,7 @@ def plot_2d(wf_dict, eval_dict):
                  color='#88aaff', fontsize=14, y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fname = f'{elem}_orbitals_2d.png'
-    plt.savefig(fname, dpi=150, facecolor='black', bbox_inches='tight')
+    #plt.savefig(fname, dpi=150, facecolor='black', bbox_inches='tight')
     print(f"Saved {fname}")
     plt.show()
 
@@ -344,7 +344,7 @@ def plot_3d(wf_dict, eval_dict):
                  color='#88aaff', fontsize=14, y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fname = f'{elem}_orbitals_3d.png'
-    plt.savefig(fname, dpi=150, facecolor='#0a0a14', bbox_inches='tight')
+    #plt.savefig(fname, dpi=150, facecolor='#0a0a14', bbox_inches='tight')
     print(f"Saved {fname}")
     plt.show()
 
