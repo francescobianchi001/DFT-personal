@@ -1,0 +1,33 @@
+Here are some usage examples:
+
+  # Basic 2D orbital plots
+  python3 allplotter.py 26                          # Iron, all orbitals
+  python3 allplotter.py 10 --orbital 2p             # Neon, only 2p orbital
+
+  # 3D isosurface plots
+  python3 allplotter.py 26 --3d                     # Iron, all orbitals in 3D
+  python3 allplotter.py 22 --3d --orbital 3d        # Titanium, just the 3d
+
+  # Energy queries
+  python3 allplotter.py 6 --energies                # Carbon, full energy breakdown
+  python3 allplotter.py 18 --energy total            # Argon, just E_total
+  python3 allplotter.py 26 --energy eigenvalues      # Iron, all orbital energies
+
+  # Save/load workflow (useful for heavy atoms)
+  python3 allplotter.py 26 --save Fe_data            # Run once, save results
+  python3 allplotter.py 26 --load Fe_data.npz        # Instant replot, no DFT
+  python3 allplotter.py 26 --load Fe_data.npz --3d   # 3D from saved data
+  python3 allplotter.py 26 --load Fe_data.npz --orbital 3d  # Just 3d from saved
+
+  # Compare atoms (run in sequence, save all)
+  for Z in 3 6 10 18 26; do python3 allplotter.py $Z --save Z${Z}_data --energies; done
+
+  # Higher resolution grid
+  python3 allplotter.py 10 --grid 5000              # Finer grid for accuracy
+
+  Typical workflows:
+  - Quick look: just python3 allplotter.py <Z> to see all orbitals
+  - Publication figure: run with --save, then --load --orbital 3d --3d to iterate on specific orbitals without re-running DFT
+  - Energy comparison: loop over atoms with --energy total to build a table
+  - Teaching: use --orbital to show students one orbital at a time, --energies to discuss energy contributions
+
