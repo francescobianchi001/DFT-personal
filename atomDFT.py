@@ -6,9 +6,7 @@ from scipy.integrate import simpson
 from scipy.optimize import brentq
 from scipy.integrate import cumulative_trapezoid
 from scipy.interpolate import splrep, splev
-import math as mt
 from numba import njit
-from hydrogenicatom import HydrogenicAtom
 import copy
 
 
@@ -71,9 +69,7 @@ class AtomicDFT:
     def __init__(self, grid, Z):
         self.Z = Z
         self.radial_grid = grid
-        self.START = True
         self.CONTROLL = True
-        self.Atom = HydrogenicAtom(self.Z)
 
     def _get_screened_energy(self, n, l):
         """Estimate starting eigenvalue using Slater screening rules."""
@@ -101,9 +97,16 @@ class AtomicDFT:
         Z_eff = max(Z - sigma, 1.0)
         return -Z_eff**2 / (2.0 * n**2)
 
+    @staticmethod
+    def _slater_radial(n, l, r, E):
+        """Hydrogenic Slater-type radial function u(r) = r^(l+1) * exp(-alpha*r)."""
+        alpha = np.sqrt(-2.0 * E)
+        return r**(l + 1) * np.exp(-alpha * r)
+
     def GetOrbitals(self, exp_grid=False):
         if exp_grid:
-            r = HydrogenicAtom.exponential_grid_log(1e-6, 15.0, 2000)
+            x = np.linspace(np.log(1e-6), np.log(15.0), 2000)
+            r = np.exp(x)
         else:
             r = self.radial_grid
 
@@ -158,7 +161,7 @@ class AtomicDFT:
 
             # Build the orbital
             E = self._get_screened_energy(n, l)
-            radial = self.Atom.getSlaterRadial(n, l, r, E)
+            radial = self._slater_radial(n, l, r, E)
             if exp_grid:
                 radial_spline = splrep(r, radial)
                 radial = splev(self.radial_grid, radial_spline)
