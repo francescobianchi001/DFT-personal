@@ -9,14 +9,7 @@ from scipy.interpolate import splrep, splev
 
 class AtomicDFT:
 
-    MAX_Z = 26  # Fe; uniform grid cannot resolve deeper core states
-
     def __init__(self, grid, Z):
-        if Z > self.MAX_Z:
-            raise ValueError(
-                f"Z={Z} exceeds MAX_Z={self.MAX_Z}. "
-                f"Uniform grid cannot resolve core orbitals for Z>{self.MAX_Z}."
-            )
         self.Z = Z
         self.radial_grid = grid
         self.CONTROLL = False

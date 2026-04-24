@@ -65,7 +65,7 @@ def _numerov_propagate(g, radial_grid, e, l):
 
 class AtomicDFT:
 
-    MAX_Z = 26  # Fe; uniform grid cannot resolve deeper core states
+    MAX_Z = 28  # Ni; uniform grid cannot resolve deeper core states
 
     def __init__(self, grid, Z):
         if Z > self.MAX_Z:
