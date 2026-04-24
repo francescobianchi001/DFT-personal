@@ -114,6 +114,6 @@ if not args.no_plot:
 
     plt.tight_layout()
     fname = f'{elem}_diagnosis.png'
-    plt.savefig(fname, dpi=150, bbox_inches='tight')
+    #plt.savefig(fname, dpi=150, bbox_inches='tight')
     print(f"\nSaved {fname}")
     plt.show()
