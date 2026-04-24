@@ -21,6 +21,14 @@ parser.add_argument('Z', type=int, help='Atomic number (1-28)')
 parser.add_argument('--3d', dest='three_d', action='store_true', help='3D isosurface plot')
 parser.add_argument('--orbital', type=str, default=None, help='Plot specific orbital (e.g. 3d, 2p)')
 parser.add_argument('--grid', type=int, default=3000, help='Radial grid points (default 3000)')
+parser.add_argument('--energies', action='store_true', help='Print all energy components')
+parser.add_argument('--energy', type=str, default=None,
+                    choices=['total', 'kinetic', 'hartree', 'xc', 'nuclear', 'eigenvalues'],
+                    help='Print a specific energy component')
+parser.add_argument('--save', type=str, default=None, metavar='FILE',
+                    help='Save WF, eigenvalues, density and grid to .npz file')
+parser.add_argument('--load', type=str, default=None, metavar='FILE',
+                    help='Load WF data from .npz file instead of running DFT')
 args = parser.parse_args()
 
 Z = args.Z
@@ -34,24 +42,48 @@ element_names = {
 elem = element_names.get(Z, f"Z={Z}")
 
 # ============================================================
-# Run DFT
+# Run DFT or load from file
 # ============================================================
 from atomDFT import AtomicDFT
 
-print(f"Running KS-LDA for {elem} (Z={Z})...")
-r = np.linspace(1e-6, 15.0, args.grid)
-dft = AtomicDFT(r, Z)
-dft.CONTROLL = False
-WF = dft.GetOrbitals()
+l_names = 'spdf'
 
-old_stdout = sys.stdout; sys.stdout = io.StringIO()
-evals, WF_final, rho = dft.GetKohnShamEquation(WF)
-sys.stdout = old_stdout
+if args.load:
+    print(f"Loading data from {args.load}...")
+    data = np.load(args.load, allow_pickle=True)
+    r = data['grid']
+    rho = data['rho']
+    evals = data['eigenvalues'].tolist()
+    occupied = data['occupied'].tolist()
+    WF_final = data['wavefunctions'].tolist()
+    # Reconstruct dft object for energy calculations
+    dft = AtomicDFT(r, Z)
+    dft.CONTROLL = False
+    dft.GetOrbitals()
+    dft.occupied = occupied
+else:
+    print(f"Running KS-LDA for {elem} (Z={Z})...")
+    r = np.linspace(1e-6, 15.0, args.grid)
+    dft = AtomicDFT(r, Z)
+    dft.CONTROLL = False
+    WF = dft.GetOrbitals()
 
-Exc = dft.getXC_Energy(rho)
+    old_stdout = sys.stdout; sys.stdout = io.StringIO()
+    evals, WF_final, rho = dft.GetKohnShamEquation(WF)
+    sys.stdout = old_stdout
+
+if args.save:
+    fname = args.save if args.save.endswith('.npz') else args.save + '.npz'
+    np.savez(fname,
+             grid=r,
+             rho=rho,
+             eigenvalues=np.array(evals, dtype=object),
+             occupied=np.array(dft.occupied, dtype=object),
+             wavefunctions=np.array(WF_final, dtype=object),
+             Z=Z)
+    print(f"Saved data to {fname}")
 
 # Build orbital dictionary
-l_names = 'spdf'
 wf_dict = {}
 eval_dict = {}
 for i, shell in enumerate(WF_final):
@@ -66,6 +98,49 @@ for i, shell in enumerate(WF_final):
 print(f"Converged orbitals for {elem}:")
 for label in wf_dict:
     print(f"  {label}: {eval_dict[label]:.6f} Ha")
+
+# ============================================================
+# Energy output
+# ============================================================
+if args.energies or args.energy:
+    from scipy.integrate import simpson
+    Ekin = dft.getEkin(WF_final)
+    Een = dft.getEenuc(rho)
+    Eh = dft.getH_Energy(rho)
+    Exc = dft.getXC_Energy(rho)
+    E_tot = dft.getE_tot(rho, WF_final)
+
+    energies = {
+        'kinetic':     ('E_kinetic',  Ekin),
+        'nuclear':     ('E_nuclear',  Een),
+        'hartree':     ('E_hartree',  Eh),
+        'xc':          ('E_xc',       Exc),
+        'total':       ('E_total',    E_tot),
+    }
+
+    if args.energy == 'eigenvalues':
+        print(f"\nEigenvalues for {elem} (Z={Z}):")
+        for label in wf_dict:
+            i = int(label[0]) - 1
+            j = l_names.index(label[1])
+            occ = dft.occupied[i][j]
+            print(f"  {label}: {eval_dict[label]:12.6f} Ha  (occ={occ})")
+    elif args.energy:
+        name, val = energies[args.energy]
+        print(f"\n{name} = {val:.6f} Ha")
+    else:
+        print(f"\n{'='*40}")
+        print(f"  Energy components for {elem} (Z={Z})")
+        print(f"{'='*40}")
+        for key, (name, val) in energies.items():
+            print(f"  {name:12s}  {val:12.6f} Ha")
+        print(f"{'='*40}")
+        print(f"\n  Eigenvalues:")
+        for label in wf_dict:
+            i = int(label[0]) - 1
+            j = l_names.index(label[1])
+            occ = dft.occupied[i][j]
+            print(f"    {label}: {eval_dict[label]:12.6f} Ha  (occ={occ})")
 
 # Filter if specific orbital requested
 if args.orbital:
@@ -270,12 +345,7 @@ def plot_3d(wf_dict, eval_dict):
 # ============================================================
 # Run
 # ============================================================
-
-print(Exc)
-
 if args.three_d:
     plot_3d(wf_dict, eval_dict)
 else:
     plot_2d(wf_dict, eval_dict)
-
-
