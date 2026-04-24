@@ -7,7 +7,6 @@ from scipy.optimize import brentq
 from scipy.integrate import cumulative_trapezoid
 from scipy.interpolate import splrep, splev
 from numba import njit
-import copy
 
 
 @njit
@@ -66,10 +65,17 @@ def _numerov_propagate(g, radial_grid, e, l):
 
 class AtomicDFT:
 
+    MAX_Z = 26  # Fe; uniform grid cannot resolve deeper core states
+
     def __init__(self, grid, Z):
+        if Z > self.MAX_Z:
+            raise ValueError(
+                f"Z={Z} exceeds MAX_Z={self.MAX_Z}. "
+                f"Uniform grid cannot resolve core orbitals for Z>{self.MAX_Z}."
+            )
         self.Z = Z
         self.radial_grid = grid
-        self.CONTROLL = True
+        self.CONTROLL = False
 
     def _get_screened_energy(self, n, l):
         """Estimate starting eigenvalue using Slater screening rules."""
@@ -314,7 +320,7 @@ class AtomicDFT:
         return eigenvalues_next, tuple(WF_next_s)
 
     def run_SCF(self, eigenvalues, WF, Veff, max_iter=200, treshold=1e-6):
-        eigenvalues_old = copy.deepcopy(eigenvalues)
+        eigenvalues_old = [[e for e in shell] for shell in eigenvalues]
         Rho_old = self.getRadialDensity(WF)
         Veff_mixed = Veff.copy()
         for iteration in range(max_iter):
@@ -351,8 +357,8 @@ class AtomicDFT:
             delta = np.max(np.abs(flat_next - flat_old))
             if self.CONTROLL:
                 print(f"SCF iter {iteration}: damp={damp:.2f} delta={delta:.2e}, eigenvalues={eigenvalues_next}")
-            eigenvalues_old = copy.deepcopy(eigenvalues_next)
-            WF = copy.deepcopy(WF_next)
+            eigenvalues_old = [[e for e in shell] for shell in eigenvalues_next]
+            WF = [[wf.copy() for wf in shell] for shell in WF_next]
             Rho_old = Rho_mixed.copy()
             if delta <= treshold: break
         return eigenvalues_next, WF_next
@@ -405,7 +411,8 @@ class AtomicDFT:
                 E_f, WF_f = self.getEigenValue(Bracket_Eigenvalue, Vl, lshell)
                 WF_init[nshell - 1].append(WF_f)
                 eigenvalues[nshell - 1].append(E_f)
-        print(f"First pass eigenvalues: {eigenvalues}")
+        if self.CONTROLL:
+            print(f"First pass eigenvalues: {eigenvalues}")
         eigenvalues, WF_final = self.run_SCF(eigenvalues, WF_init, Veff)
         Rho = self.getRadialDensity(WF_final)
         return eigenvalues, WF_final, Rho
