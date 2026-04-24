@@ -29,6 +29,8 @@ parser.add_argument('--save', type=str, default=None, metavar='FILE',
                     help='Save WF, eigenvalues, density and grid to .npz file')
 parser.add_argument('--load', type=str, default=None, metavar='FILE',
                     help='Load WF data from .npz file instead of running DFT')
+parser.add_argument('--original', action='store_true',
+                    help='Use the original (non-optimized) solver instead of the fast one')
 args = parser.parse_args()
 
 Z = args.Z
@@ -44,7 +46,11 @@ elem = element_names.get(Z, f"Z={Z}")
 # ============================================================
 # Run DFT or load from file
 # ============================================================
-from atomDFT import AtomicDFT
+if args.original:
+    from atomDFT_original import AtomicDFT
+    print("Using original (non-optimized) solver")
+else:
+    from atomDFT import AtomicDFT
 
 l_names = 'spdf'
 
