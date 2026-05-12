@@ -104,6 +104,21 @@ Hydrogen (Z=1) through Nickel (Z=28). Typical timings on a 3000-point grid:
 | Fe   | 26 | 17s |
 | Ni   | 28 | 24s |
 
+## Validation
+
+Total energies compared against the NIST [Atomic Reference Data for Electronic Structure Calculations](https://www.nist.gov/pml/atomic-reference-data-electronic-structure-calculations/atomic-reference-data-electro) (LDA, spin-restricted). All values in Hartree.
+
+| Atom | Z  | This code    | NIST LDA     | ΔE (Ha)  |
+|------|----|--------------|--------------|----------|
+| H    | 1  | -0.445673    | -0.445671    | 2e-6     |
+| He   | 2  | -2.834903    | -2.834836    | 7e-5     |
+| C    | 6  | -37.432981   | -37.425749   | 7e-3     |
+| N    | 7  | -54.038624   | -54.025016   | 1e-2     |
+| O    | 8  | -74.496514   | -74.473077   | 2e-2     |
+| S    | 16 | -397.093383  | -397.034551  | 6e-2     |
+
+Agreement is at the micro-Hartree level for one-/two-electron atoms; the deviation grows with Z due to the uniform radial grid (NIST uses a logarithmic grid better suited to resolving the core).
+
 ## Method
 
 The code solves the radial Kohn-Sham equations:
