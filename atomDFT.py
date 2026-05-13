@@ -67,15 +67,22 @@ class AtomicDFT:
 
     MAX_Z = 28  # Ni; uniform grid cannot resolve deeper core states
 
-    def __init__(self, grid, Z):
+    def __init__(self, grid, Z, charge=0,r0=None):
         if Z > self.MAX_Z:
             raise ValueError(
                 f"Z={Z} exceeds MAX_Z={self.MAX_Z}. "
                 f"Uniform grid cannot resolve core orbitals for Z>{self.MAX_Z}."
             )
-        self.Z = Z
+        if not (0 <= charge < Z):
+            raise ValueError(
+                f"charge={charge} must satisfy 0 <= charge < Z={Z}"
+            )
+        self.Z = Z              # nuclear charge (sets Coulomb potential)
+        self.charge = charge
+        self.N_e = Z - charge   # electron count (drives aufbau filling)
         self.radial_grid = grid
         self.CONTROLL = False
+        self.r0 = r0
 
     def _get_screened_energy(self, n, l):
         """Estimate starting eigenvalue using Slater screening rules."""
@@ -83,7 +90,7 @@ class AtomicDFT:
         aufbau_fill = [(1,0,2),(2,0,2),(2,1,6),(3,0,2),(3,1,6),(4,0,2),(3,2,10),
                         (4,1,6),(5,0,2),(4,2,10),(5,1,6),(6,0,2),(4,3,14),(5,2,10)]
         filled = {}
-        rem = Z
+        rem = self.N_e
         for (gn, gl, gmax) in aufbau_fill:
             if rem <= 0: break
             filled[(gn,gl)] = min(rem, gmax)
@@ -137,7 +144,7 @@ class AtomicDFT:
             (7,1),              # 7p
         ]
 
-        N = self.Z
+        N = self.N_e
         # Figure out which shells are needed
         max_n = 0
         remaining = N
@@ -234,13 +241,21 @@ class AtomicDFT:
         Ven = -self.Z / self.radial_grid; self.Ven = Ven
         return Ven
 
+    def get_Vconf(self):
+        r0 =self.r0
+        Vconf = (self.radial_grid/r0)**2
+        return Vconf
+
     def getEffectivePotential(self, rho):
         Vxc = self.getVXC(rho); Vh = self.getHartreePotential(rho); Ven = self.getNuclearPotential()
-        return Vxc + Vh + Ven
+        Veff = Vxc + Vh + Ven
+        if self.r0 is not None:
+            Veff += self.get_Vconf()
+        return Veff
 
     def getAngularPotential(self, l):
         return l * (l + 1) / (2 * self.radial_grid**2)
-
+    
     def getNOdes(self, WF):
         return np.sum(WF[:-1] * WF[1:] <= 0)
 
@@ -324,7 +339,6 @@ class AtomicDFT:
         Rho_old = self.getRadialDensity(WF)
         Veff_mixed = Veff.copy()
         for iteration in range(max_iter):
-            # Adaptive damping: start gentle, increase as we converge
             damp = min(0.1 + 0.01 * iteration, 0.3)
             Rho_new = self.getRadialDensity(WF)
             Rho_mixed = (1 - damp) * Rho_old + damp * Rho_new
