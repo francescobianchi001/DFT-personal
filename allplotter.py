@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm
 from scipy.interpolate import interp1d
 import sys, io, argparse
+from scipy.integrate import simpson
 
 # ============================================================
 # Parse arguments
@@ -31,10 +32,16 @@ parser.add_argument('--load', type=str, default=None, metavar='FILE',
                     help='Load WF data from .npz file instead of running DFT')
 parser.add_argument('--original', action='store_true',
                     help='Use the original (non-optimized) solver instead of the fast one')
+parser.add_argument('--charge', type=int, default=0,
+                    help='Ion charge (0=neutral, 1=+1 cation, ...). Must satisfy 0 <= charge < Z.')
+parser.add_argument('--pseudoatom', action='store_true',
+                    help='Solve the confined pseudo-atom (Vconf = (r/r0)^2, r0 = 2*r_cov)')
 args = parser.parse_args()
 
 Z = args.Z
 assert 1 <= Z <= 28, "Z must be between 1 and 28"
+charge = args.charge
+assert 0 <= charge < Z, f"charge must satisfy 0 <= charge < Z={Z}"
 
 element_names = {
     1:'H', 2:'He', 3:'Li', 4:'Be', 5:'B', 6:'C', 7:'N', 8:'O', 9:'F', 10:'Ne',
@@ -62,18 +69,39 @@ if args.load:
     evals = data['eigenvalues'].tolist()
     occupied = data['occupied'].tolist()
     WF_final = data['wavefunctions'].tolist()
+    saved_charge = int(data['charge']) if 'charge' in data.files else 0
     # Reconstruct dft object for energy calculations
-    dft = AtomicDFT(r, Z)
+    dft = AtomicDFT(r, Z, charge=saved_charge)
     dft.CONTROLL = False
     dft.GetOrbitals()
     dft.occupied = occupied
 else:
-    print(f"Running KS-LDA for {elem} (Z={Z})...")
+    label = elem if charge == 0 else f"{elem}{charge:+d}"
+    print(f"Running KS-LDA for {label} (Z={Z}, charge={charge})...")
     r = np.linspace(1e-6, 15.0, args.grid)
-    dft = AtomicDFT(r, Z)
+    dft = AtomicDFT(r, Z, charge=charge)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
 
+    old_stdout = sys.stdout; sys.stdout = io.StringIO()
+    evals, WF_final, rho = dft.GetKohnShamEquation(WF)
+    sys.stdout = old_stdout
+
+# Covalent radii (Cordero 2008), in bohr (Å × 1.8897)
+R_COV = {
+    1: 0.586,  2: 0.529,  3: 2.419,  4: 1.814,  5: 1.588,  6: 1.436,
+    7: 1.342,  8: 1.247,  9: 1.077, 10: 1.096, 11: 3.137, 12: 2.665,
+    13: 2.287, 14: 2.098, 15: 2.022, 16: 1.984, 17: 1.928, 18: 2.003,
+    19: 3.836, 20: 3.326, 21: 3.213, 22: 3.024, 23: 2.891, 24: 2.627,
+    25: 2.627, 26: 2.494, 27: 2.381, 28: 2.343,
+}
+
+if args.pseudoatom:
+    r0 = 2 * R_COV[Z]
+    print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr")
+    dft = AtomicDFT(r, Z, charge=charge, r0=r0)
+    dft.CONTROLL = False
+    WF = dft.GetOrbitals()
     old_stdout = sys.stdout; sys.stdout = io.StringIO()
     evals, WF_final, rho = dft.GetKohnShamEquation(WF)
     sys.stdout = old_stdout
@@ -86,7 +114,8 @@ if args.save:
              eigenvalues=np.array(evals, dtype=object),
              occupied=np.array(dft.occupied, dtype=object),
              wavefunctions=np.array(WF_final, dtype=object),
-             Z=Z)
+             Z=Z,
+             charge=dft.charge)
     print(f"Saved data to {fname}")
 
 # Build orbital dictionary
