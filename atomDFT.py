@@ -7,6 +7,7 @@ from scipy.optimize import brentq
 from scipy.integrate import cumulative_trapezoid
 from scipy.interpolate import splrep, splev
 from numba import njit
+import time
 
 
 @njit
@@ -241,8 +242,9 @@ class AtomicDFT:
         Ven = -self.Z / self.radial_grid; self.Ven = Ven
         return Ven
 
-    def get_Vconf(self):
-        r0 =self.r0
+    def get_Vconf(self, r0=None):
+        if r0 is None:
+            r0 = self.r0
         Vconf = (self.radial_grid/r0)**2
         return Vconf
 
@@ -274,7 +276,7 @@ class AtomicDFT:
         WF, F1 = self.getWaveFunction_numerov(e1, l, Veff)
         for _ in range(5000):
             e2 = e1 + delta
-            if e2 >= 0: break
+            if self.r0 is None and e2 >= 0: break
             WF, F2 = self.getWaveFunction_numerov(e2, l, Veff)
             if np.isnan(F2): break
             nodes = self.getNOdes(WF)
@@ -376,6 +378,56 @@ class AtomicDFT:
             Rho_old = Rho_mixed.copy()
             if delta <= treshold: break
         return eigenvalues_next, WF_next
+    
+    def getpseudoWF(self, eigenvalues, WF, Veff, max_iter=200, treshold=1e-6):
+        range_r0 = [10000,1000,100,50,10,self.r0]
+        Veff_old = Veff.copy()
+        eigenvalues_old = [[e for e in shell] for shell in eigenvalues]
+        Rho_old = self.getRadialDensity(WF)
+        for r0 in range_r0:
+            for iteration in range(max_iter):
+                damp = min(0.1 + 0.01 * iteration, 0.3)
+                Veff_new = Veff_old + self.get_Vconf(r0)
+                Rho_new = self.getRadialDensity(WF)
+                Rho_mixed = Rho_old*(1-damp)+Rho_new*damp
+                Veff_mixed = Veff_old*(1-damp)+Veff_new*damp
+                eigenvalues_next = []; WF_next = []
+                for n in range(1,self.nshells+1):
+                    eigenvalues_next.append([])
+                    WF_next.append([])
+                    for l in range(len(self.occupied[n-1])):
+                        Vr = self.Vr[n-1][l]
+                        Veff_next = Veff_mixed + Vr
+                        if self.occupied[n-1][l] == 0:
+                            eigenvalues_next[n-1].append(0)
+                            WF_next[n-1].append(np.zeros_like(self.radial_grid))
+                            continue
+                        E_start = eigenvalues_old[n-1][l]
+                        Bracket = self.getBracketEnergy(E_start, Veff_next, n, l)
+                        if Bracket is None:
+                            if self.CONTROLL:
+                                print(f"WARNING: bracket failed n={n},l={l},E={E_start:.4f}, reusing old")
+                            eigenvalues_next[n-1].append(E_start)
+                            WF_next[n-1].append(WF[n-1][l])
+                            continue
+                        E_f, WF_f = self.getEigenValue(Bracket, Veff_next, l)
+                        WF_next[n - 1].append(WF_f)
+                        eigenvalues_next[n - 1].append(E_f)
+            self.eigenvalues = eigenvalues_next
+            flat_next = np.array([e for shell in eigenvalues_next for e in shell])
+            flat_old = np.array([e for shell in eigenvalues_old for e in shell])
+            delta = np.max(np.abs(flat_next - flat_old))
+            if self.CONTROLL:
+                print(f"SCF iter {iteration}: damp={damp:.2f} delta={delta:.2e}, eigenvalues={eigenvalues_next}")
+            eigenvalues_old = [[e for e in shell] for shell in eigenvalues_next]
+            WF = [[wf.copy() for wf in shell] for shell in WF_next]
+            Rho_old = Rho_mixed.copy()
+            if delta <= treshold: break
+        if self.CONTROLL:
+            [plt.plot(wf) for shell in WF for wf in shell]
+            plt.show()
+            time.sleep(20)
+        return eigenvalues_next, WF_next
 
     def GetKohnShamEquation(self, WF=None):
         self.Vr = [[self.getAngularPotential(l) for l in range(nshell)]
@@ -430,6 +482,13 @@ class AtomicDFT:
         eigenvalues, WF_final = self.run_SCF(eigenvalues, WF_init, Veff)
         Rho = self.getRadialDensity(WF_final)
         return eigenvalues, WF_final, Rho
+    
+    def solveKS_psudoAtom(self,eigenvalues,WF_final,Rho):
+        Veff = self.getEffectivePotential(Rho)
+        eigenvalues, WF_final = self.getpseudoWF(eigenvalues, WF_final, Veff)
+        Rho = self.getRadialDensity(WF_final)
+        return eigenvalues, WF_final,Rho
+
 
     # Get final energies
 

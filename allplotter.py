@@ -104,6 +104,7 @@ if args.pseudoatom:
     WF = dft.GetOrbitals()
     old_stdout = sys.stdout; sys.stdout = io.StringIO()
     evals, WF_final, rho = dft.GetKohnShamEquation(WF)
+    evals, WF_final, rho = dft.solveKS_psudoAtom(evals,WF_final,rho)
     sys.stdout = old_stdout
 
 if args.save:
