@@ -11,16 +11,25 @@ import time
 
 
 @njit
-def _numerov_propagate(g, radial_grid, e, l):
-    """Numba-compiled Numerov propagation (forward + backward + matching)."""
+def _numerov_propagate(g, radial_grid, e, l, confined):
+    """Numba-compiled Numerov propagation (forward + backward + matching).
+
+    confined=True imposes a Dirichlet wall at the box edge (u->0), which is
+    valid for any sign of E. The unconfined branch keeps the decaying-exponential
+    boundary exp(-sqrt(-2e)*r), which only makes sense for E<0.
+    """
     N = len(radial_grid)
     h = radial_grid[1] - radial_grid[0]
     c1 = 5.0 * h**2 / 12.0
     c2 = h**2 / 12.0
-    sqrt_neg2e = np.sqrt(-2.0 * e)
     y_right = np.zeros(N)
-    y_right[N-1] = np.exp(-sqrt_neg2e * radial_grid[N-1])
-    y_right[N-2] = np.exp(-sqrt_neg2e * radial_grid[N-2])
+    if confined:
+        y_right[N-1] = 0.0
+        y_right[N-2] = 1e-12
+    else:
+        sqrt_neg2e = np.sqrt(-2.0 * e)
+        y_right[N-1] = np.exp(-sqrt_neg2e * radial_grid[N-1])
+        y_right[N-2] = np.exp(-sqrt_neg2e * radial_grid[N-2])
     y_left = np.zeros(N)
     y_left[0] = radial_grid[0]**(l + 1)
     y_left[1] = radial_grid[1]**(l + 1)
@@ -259,7 +268,12 @@ class AtomicDFT:
         return l * (l + 1) / (2 * self.radial_grid**2)
     
     def getNOdes(self, WF):
-        return np.sum(WF[:-1] * WF[1:] <= 0)
+        # Count genuine sign changes, ignoring exact zeros (origin, Dirichlet
+        # box wall, or a node landing exactly on a grid point) so the confining
+        # wall's u=0 endpoint is not miscounted as a node.
+        sign = np.sign(WF)
+        sign = sign[sign != 0]
+        return np.sum(sign[:-1] != sign[1:])
 
     def getEigenValue(self, bracket_Eigenvalue, Veff, l):
         def root_f(E):
@@ -296,7 +310,7 @@ class AtomicDFT:
     def getWaveFunction_numerov(self, e, l, Veff):
         h = self.radial_grid[1] - self.radial_grid[0]
         g = 2.0 * (e - Veff)
-        Y, dL, dR, tp = _numerov_propagate(g, self.radial_grid, e, l)
+        Y, dL, dR, tp = _numerov_propagate(g, self.radial_grid, e, l, self.r0 is not None)
         norm = simpson(Y**2, x=self.radial_grid)
         y = Y / np.sqrt(norm)
         F = 1.0 / np.sqrt(norm) * (dL - dR) / (2.0 * h)
@@ -379,56 +393,6 @@ class AtomicDFT:
             if delta <= treshold: break
         return eigenvalues_next, WF_next
     
-    def getpseudoWF(self, eigenvalues, WF, Veff, max_iter=200, treshold=1e-6):
-        range_r0 = [10000,1000,100,50,10,self.r0]
-        Veff_old = Veff.copy()
-        eigenvalues_old = [[e for e in shell] for shell in eigenvalues]
-        Rho_old = self.getRadialDensity(WF)
-        for r0 in range_r0:
-            for iteration in range(max_iter):
-                damp = min(0.1 + 0.01 * iteration, 0.3)
-                Veff_new = Veff_old + self.get_Vconf(r0)
-                Rho_new = self.getRadialDensity(WF)
-                Rho_mixed = Rho_old*(1-damp)+Rho_new*damp
-                Veff_mixed = Veff_old*(1-damp)+Veff_new*damp
-                eigenvalues_next = []; WF_next = []
-                for n in range(1,self.nshells+1):
-                    eigenvalues_next.append([])
-                    WF_next.append([])
-                    for l in range(len(self.occupied[n-1])):
-                        Vr = self.Vr[n-1][l]
-                        Veff_next = Veff_mixed + Vr
-                        if self.occupied[n-1][l] == 0:
-                            eigenvalues_next[n-1].append(0)
-                            WF_next[n-1].append(np.zeros_like(self.radial_grid))
-                            continue
-                        E_start = eigenvalues_old[n-1][l]
-                        Bracket = self.getBracketEnergy(E_start, Veff_next, n, l)
-                        if Bracket is None:
-                            if self.CONTROLL:
-                                print(f"WARNING: bracket failed n={n},l={l},E={E_start:.4f}, reusing old")
-                            eigenvalues_next[n-1].append(E_start)
-                            WF_next[n-1].append(WF[n-1][l])
-                            continue
-                        E_f, WF_f = self.getEigenValue(Bracket, Veff_next, l)
-                        WF_next[n - 1].append(WF_f)
-                        eigenvalues_next[n - 1].append(E_f)
-            self.eigenvalues = eigenvalues_next
-            flat_next = np.array([e for shell in eigenvalues_next for e in shell])
-            flat_old = np.array([e for shell in eigenvalues_old for e in shell])
-            delta = np.max(np.abs(flat_next - flat_old))
-            if self.CONTROLL:
-                print(f"SCF iter {iteration}: damp={damp:.2f} delta={delta:.2e}, eigenvalues={eigenvalues_next}")
-            eigenvalues_old = [[e for e in shell] for shell in eigenvalues_next]
-            WF = [[wf.copy() for wf in shell] for shell in WF_next]
-            Rho_old = Rho_mixed.copy()
-            if delta <= treshold: break
-        if self.CONTROLL:
-            [plt.plot(wf) for shell in WF for wf in shell]
-            plt.show()
-            time.sleep(20)
-        return eigenvalues_next, WF_next
-
     def GetKohnShamEquation(self, WF=None):
         self.Vr = [[self.getAngularPotential(l) for l in range(nshell)]
                     for nshell in range(1, self.nshells + 1)]
@@ -483,13 +447,6 @@ class AtomicDFT:
         Rho = self.getRadialDensity(WF_final)
         return eigenvalues, WF_final, Rho
     
-    def solveKS_psudoAtom(self,eigenvalues,WF_final,Rho):
-        Veff = self.getEffectivePotential(Rho)
-        eigenvalues, WF_final = self.getpseudoWF(eigenvalues, WF_final, Veff)
-        Rho = self.getRadialDensity(WF_final)
-        return eigenvalues, WF_final,Rho
-
-
     # Get final energies
 
     def getXC_Energy(self, rho):
