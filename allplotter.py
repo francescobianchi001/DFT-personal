@@ -36,12 +36,17 @@ parser.add_argument('--charge', type=int, default=0,
                     help='Ion charge (0=neutral, 1=+1 cation, ...). Must satisfy 0 <= charge < Z.')
 parser.add_argument('--pseudoatom', action='store_true',
                     help='Solve the confined pseudo-atom (Vconf = (r/r0)^2, r0 = 2*r_cov)')
+parser.add_argument('--exp-grid', dest='exp_grid', action='store_true',
+                    help='Use an exponential radial grid (dense near the nucleus, sparse far '
+                         'out): far more accurate per grid point. Optimized solver only.')
 args = parser.parse_args()
 
 Z = args.Z
 assert 1 <= Z <= 28, "Z must be between 1 and 28"
 charge = args.charge
 assert 0 <= charge < Z, f"charge must satisfy 0 <= charge < Z={Z}"
+if args.exp_grid and args.original:
+    parser.error("--exp-grid is only supported by the optimized solver (not --original)")
 
 element_names = {
     1:'H', 2:'He', 3:'Li', 4:'Be', 5:'B', 6:'C', 7:'N', 8:'O', 9:'F', 10:'Ne',
@@ -79,7 +84,8 @@ else:
     label = elem if charge == 0 else f"{elem}{charge:+d}"
     print(f"Running KS-LDA for {label} (Z={Z}, charge={charge})...")
     r = np.linspace(1e-6, 15.0, args.grid)
-    dft = AtomicDFT(r, Z, charge=charge)
+    dft = AtomicDFT(r, Z, charge=charge, exp_grid=args.exp_grid)
+    r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
 
@@ -99,7 +105,8 @@ R_COV = {
 if args.pseudoatom:
     r0 = 2 * R_COV[Z]
     print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr")
-    dft = AtomicDFT(r, Z, charge=charge, r0=r0)
+    dft = AtomicDFT(r, Z, charge=charge, r0=r0, exp_grid=args.exp_grid)
+    r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
     old_stdout = sys.stdout; sys.stdout = io.StringIO()
@@ -283,7 +290,7 @@ def plot_2d(wf_dict, eval_dict):
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fname = f'{elem}_orbitals_2d.png'
     #plt.savefig(fname, dpi=150, facecolor='black', bbox_inches='tight')
-    print(f"Saved {fname}")
+    #print(f"Saved {fname}")
     plt.show()
 
 # ============================================================
@@ -374,7 +381,7 @@ def plot_3d(wf_dict, eval_dict):
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fname = f'{elem}_orbitals_3d.png'
     #plt.savefig(fname, dpi=150, facecolor='#0a0a14', bbox_inches='tight')
-    print(f"Saved {fname}")
+    #print(f"Saved {fname}")
     plt.show()
 
 # ============================================================

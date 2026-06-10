@@ -11,15 +11,20 @@ import time
 
 
 @njit
-def _numerov_propagate(g, radial_grid, e, l, confined):
+def _numerov_propagate(g, step_grid, r_phys, e, l, confined, exp_grid):
     """Numba-compiled Numerov propagation (forward + backward + matching).
 
-    confined=True imposes a Dirichlet wall at the box edge (u->0), which is
-    valid for any sign of E. The unconfined branch keeps the decaying-exponential
-    boundary exp(-sqrt(-2e)*r), which only makes sense for E<0.
+    Integrates w'' + g w = 0 on the uniform coordinate ``step_grid``:
+      - uniform grid:  step_grid == r_phys,  w == u(r)
+      - exp grid:      step_grid == x=ln(r), w == u/sqrt(r)
+    ``r_phys`` is always the physical radius, used only for the boundary seeds.
+
+    confined=True imposes a Dirichlet wall at the box edge (w->0), valid for any
+    sign of E. The unconfined branch keeps the decaying-exponential boundary,
+    which only makes sense for E<0.
     """
-    N = len(radial_grid)
-    h = radial_grid[1] - radial_grid[0]
+    N = len(step_grid)
+    h = step_grid[1] - step_grid[0]
     c1 = 5.0 * h**2 / 12.0
     c2 = h**2 / 12.0
     y_right = np.zeros(N)
@@ -28,11 +33,21 @@ def _numerov_propagate(g, radial_grid, e, l, confined):
         y_right[N-2] = 1e-12
     else:
         sqrt_neg2e = np.sqrt(-2.0 * e)
-        y_right[N-1] = np.exp(-sqrt_neg2e * radial_grid[N-1])
-        y_right[N-2] = np.exp(-sqrt_neg2e * radial_grid[N-2])
+        if exp_grid:
+            # w = u/sqrt(r): decaying tail exp(-k r)/sqrt(r)
+            y_right[N-1] = np.exp(-sqrt_neg2e * r_phys[N-1]) / np.sqrt(r_phys[N-1])
+            y_right[N-2] = np.exp(-sqrt_neg2e * r_phys[N-2]) / np.sqrt(r_phys[N-2])
+        else:
+            y_right[N-1] = np.exp(-sqrt_neg2e * r_phys[N-1])
+            y_right[N-2] = np.exp(-sqrt_neg2e * r_phys[N-2])
     y_left = np.zeros(N)
-    y_left[0] = radial_grid[0]**(l + 1)
-    y_left[1] = radial_grid[1]**(l + 1)
+    if exp_grid:
+        # u ~ r^(l+1)  ->  w = u/sqrt(r) ~ r^(l+1/2)
+        y_left[0] = r_phys[0]**(l + 0.5)
+        y_left[1] = r_phys[1]**(l + 0.5)
+    else:
+        y_left[0] = r_phys[0]**(l + 1)
+        y_left[1] = r_phys[1]**(l + 1)
     # Find turning point
     tp = 0
     last_pos = -1
@@ -77,7 +92,7 @@ class AtomicDFT:
 
     MAX_Z = 28  # Ni; uniform grid cannot resolve deeper core states
 
-    def __init__(self, grid, Z, charge=0,r0=None):
+    def __init__(self, grid, Z, charge=0,r0=None,exp_grid=False):
         if Z > self.MAX_Z:
             raise ValueError(
                 f"Z={Z} exceeds MAX_Z={self.MAX_Z}. "
@@ -90,7 +105,17 @@ class AtomicDFT:
         self.Z = Z              # nuclear charge (sets Coulomb potential)
         self.charge = charge
         self.N_e = Z - charge   # electron count (drives aufbau filling)
-        self.radial_grid = grid
+        self.exp_grid = exp_grid
+        if exp_grid:
+            # Exponential radial grid over the SAME [r_min, r_max] as the input
+            # grid. x = ln(r) is the uniform integration variable (constant
+            # step -> standard Numerov); r = exp(x) is the physical radius used
+            # by all downstream code via self.radial_grid. Built once, here.
+            self.x_grid = np.linspace(np.log(grid[0]), np.log(grid[-1]), len(grid))
+            self.radial_grid = np.exp(self.x_grid)
+        else:
+            self.x_grid = None
+            self.radial_grid = grid
         self.CONTROLL = False
         self.r0 = r0
 
@@ -126,12 +151,10 @@ class AtomicDFT:
         alpha = np.sqrt(-2.0 * E)
         return r**(l + 1) * np.exp(-alpha * r)
 
-    def GetOrbitals(self, exp_grid=False):
-        if exp_grid:
-            x = np.linspace(np.log(1e-6), np.log(15.0), 2000)
-            r = np.exp(x)
-        else:
-            r = self.radial_grid
+    def GetOrbitals(self):
+        # self.radial_grid is already the exponential grid when exp_grid=True,
+        # so the Slater initial guess is built directly on it either way.
+        r = self.radial_grid
 
         # Aufbau filling order: (n, l) pairs
         aufbau = [
@@ -185,9 +208,6 @@ class AtomicDFT:
             # Build the orbital
             E = self._get_screened_energy(n, l)
             radial = self._slater_radial(n, l, r, E)
-            if exp_grid:
-                radial_spline = splrep(r, radial)
-                radial = splev(self.radial_grid, radial_spline)
             norm = simpson(radial**2, x=self.radial_grid)
             radial = radial / np.sqrt(norm)
 
@@ -308,10 +328,21 @@ class AtomicDFT:
         return None
 
     def getWaveFunction_numerov(self, e, l, Veff):
-        h = self.radial_grid[1] - self.radial_grid[0]
         g = 2.0 * (e - Veff)
-        Y, dL, dR, tp = _numerov_propagate(g, self.radial_grid, e, l, self.r0 is not None)
-        norm = simpson(Y**2, x=self.radial_grid)
+        if self.exp_grid:
+            # Step on the uniform variable x (constant h). Transform to the
+            # log grid: g_tilde = r**2 * g - 1/4, with w = u/sqrt(r) the solved
+            # function (r = self.radial_grid = exp(x)).
+            step_grid = self.x_grid
+            g = self.radial_grid**2 * g - 1/4
+        else:
+            step_grid = self.radial_grid
+        h = step_grid[1] - step_grid[0]
+        Y, dL, dR, tp = _numerov_propagate(
+            g, step_grid, self.radial_grid, e, l, self.r0 is not None, self.exp_grid)
+        if self.exp_grid:
+            Y = np.exp(self.x_grid / 2) * Y          # w -> u = sqrt(r) * w
+        norm = simpson(Y**2, x=self.radial_grid)     # normalise u over physical r
         y = Y / np.sqrt(norm)
         F = 1.0 / np.sqrt(norm) * (dL - dR) / (2.0 * h)
         if self.CONTROLL:
