@@ -307,7 +307,14 @@ class AtomicDFT:
         def root_f(E):
             _, F = self.getWaveFunction_numerov(E, l, Veff)
             return F
-        eigenvalue = brentq(root_f, bracket_Eigenvalue[0], bracket_Eigenvalue[1])
+        a, b = bracket_Eigenvalue
+        try:
+            eigenvalue = brentq(root_f, a, b)
+        except ValueError:
+            # F does not sign-change across the bracket -- can happen for the
+            # tight node-count brackets of deep states. Use the midpoint, which
+            # node-count bisection has already pinned to the eigenvalue.
+            eigenvalue = 0.5 * (a + b)
         WF, _ = self.getWaveFunction_numerov(eigenvalue, l, Veff)
         return eigenvalue, WF
 
@@ -333,7 +340,64 @@ class AtomicDFT:
             nodes = self.getNOdes(WF)
             if F2 * F1 < 0 and nodes == target_nodes: return (e2, e1)
             e1, F1 = e2, F2
-        return None
+        # Fast path (F sign-change + node count at one coarse step) failed --
+        # a deep, sharply varying state. Fall back to robust node-count bracketing.
+        return self._bracket_by_nodecount(E_start, Veff, n, l)
+
+    def _bracket_by_nodecount(self, E_start, Veff, n, l):
+        """Robust eigenvalue bracket for deep states.
+
+        The node count of the matched solution is a monotonic, integer-valued
+        function of E (it increments by one at each eigenvalue), so it is immune
+        to the sharp/ill-behaved matching function F that defeats the fast path.
+        Walk to an interval that straddles the target node count, then bisect on
+        node count. Returns a tight (e_lo, e_hi) or None.
+        """
+        target = n - l - 1
+        delta = max(0.001 * abs(E_start), 0.01)
+
+        def nodes_at(E):
+            WF, _ = self.getWaveFunction_numerov(E, l, Veff)
+            return self.getNOdes(WF)
+
+        # Phase 1: walk until nodes(e_lo) <= target < nodes(e_hi).
+        if nodes_at(E_start) <= target:
+            # eigenvalue lies above E_start -> walk up
+            e_lo, e_hi, e = E_start, None, E_start
+            for _ in range(5000):
+                e += delta
+                if self.r0 is None and e >= 0:
+                    break
+                if nodes_at(e) <= target:
+                    e_lo = e
+                else:
+                    e_hi = e
+                    break
+            if e_hi is None:
+                return None
+        else:
+            # eigenvalue lies below E_start -> walk down
+            e_lo, e_hi, e = None, E_start, E_start
+            for _ in range(5000):
+                e -= delta
+                if nodes_at(e) > target:
+                    e_hi = e
+                else:
+                    e_lo = e
+                    break
+            if e_lo is None:
+                return None
+
+        # Phase 2: bisect on node count to a tight interval around the eigenvalue.
+        for _ in range(60):
+            if e_hi - e_lo < 1e-9:
+                break
+            em = 0.5 * (e_lo + e_hi)
+            if nodes_at(em) > target:
+                e_hi = em
+            else:
+                e_lo = em
+        return (e_lo, e_hi)
 
     def getWaveFunction_numerov(self, e, l, Veff):
         g = 2.0 * (e - Veff)
