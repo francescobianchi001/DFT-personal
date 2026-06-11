@@ -39,10 +39,16 @@ parser.add_argument('--pseudoatom', action='store_true',
 parser.add_argument('--exp-grid', dest='exp_grid', action='store_true',
                     help='Use an exponential radial grid (dense near the nucleus, sparse far '
                          'out): far more accurate per grid point. Optimized solver only.')
+parser.add_argument('--rmin', type=float, default=1e-6,
+                    help='Inner radius of the radial grid in bohr (default 1e-6; '
+                         'try 1e-5 for robust heavy-atom exp-grid runs)')
+parser.add_argument('--rmax', type=float, default=15.0,
+                    help='Outer radius of the radial grid in bohr (default 15.0)')
 args = parser.parse_args()
 
 Z = args.Z
-assert 1 <= Z <= 28, "Z must be between 1 and 28"
+zmax = 54 if args.exp_grid else 28
+assert 1 <= Z <= zmax, f"Z must be between 1 and {zmax}" + ("" if args.exp_grid else " (use --exp-grid for heavier atoms)")
 charge = args.charge
 assert 0 <= charge < Z, f"charge must satisfy 0 <= charge < Z={Z}"
 if args.exp_grid and args.original:
@@ -83,8 +89,9 @@ if args.load:
 else:
     label = elem if charge == 0 else f"{elem}{charge:+d}"
     print(f"Running KS-LDA for {label} (Z={Z}, charge={charge})...")
-    r = np.linspace(1e-6, 15.0, args.grid)
-    dft = AtomicDFT(r, Z, charge=charge, exp_grid=args.exp_grid)
+    r = np.linspace(args.rmin, args.rmax, args.grid)
+    dft = AtomicDFT(r, Z, charge=charge, exp_grid=args.exp_grid,
+                    rmin=args.rmin, rmax=args.rmax)
     r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
@@ -103,9 +110,12 @@ R_COV = {
 }
 
 if args.pseudoatom:
+    if Z not in R_COV:
+        parser.error(f"--pseudoatom needs a covalent radius for Z={Z}; R_COV only covers Z<=28")
     r0 = 2 * R_COV[Z]
     print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr")
-    dft = AtomicDFT(r, Z, charge=charge, r0=r0, exp_grid=args.exp_grid)
+    dft = AtomicDFT(r, Z, charge=charge, r0=r0, exp_grid=args.exp_grid,
+                    rmin=args.rmin, rmax=args.rmax)
     r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()

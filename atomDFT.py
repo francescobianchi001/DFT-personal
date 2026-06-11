@@ -90,13 +90,17 @@ def _numerov_propagate(g, step_grid, r_phys, e, l, confined, exp_grid):
 
 class AtomicDFT:
 
-    MAX_Z = 28  # Ni; uniform grid cannot resolve deeper core states
+    MAX_Z = 28      # uniform grid cannot resolve deeper core states (Ni)
+    MAX_Z_EXP = 54  # exponential grid verified to Xe; beyond this the deep-state
+                    # bracketing fails (Au Z=79 cannot bracket the 1s), not the grid
 
-    def __init__(self, grid, Z, charge=0,r0=None,exp_grid=False):
-        if Z > self.MAX_Z:
+    def __init__(self, grid, Z, charge=0, r0=None, exp_grid=False, rmin=None, rmax=None):
+        cap = self.MAX_Z_EXP if exp_grid else self.MAX_Z
+        if Z > cap:
             raise ValueError(
-                f"Z={Z} exceeds MAX_Z={self.MAX_Z}. "
-                f"Uniform grid cannot resolve core orbitals for Z>{self.MAX_Z}."
+                f"Z={Z} exceeds the {'exponential' if exp_grid else 'uniform'}-grid "
+                f"limit (MAX_Z={cap})."
+                + ("" if exp_grid else " Use exp_grid=True to reach heavier atoms.")
             )
         if not (0 <= charge < Z):
             raise ValueError(
@@ -107,11 +111,15 @@ class AtomicDFT:
         self.N_e = Z - charge   # electron count (drives aufbau filling)
         self.exp_grid = exp_grid
         if exp_grid:
-            # Exponential radial grid over the SAME [r_min, r_max] as the input
-            # grid. x = ln(r) is the uniform integration variable (constant
-            # step -> standard Numerov); r = exp(x) is the physical radius used
-            # by all downstream code via self.radial_grid. Built once, here.
-            self.x_grid = np.linspace(np.log(grid[0]), np.log(grid[-1]), len(grid))
+            # Exponential radial grid. x = ln(r) is the uniform integration
+            # variable (constant step -> standard Numerov); r = exp(x) is the
+            # physical radius used by all downstream code via self.radial_grid.
+            # rmin/rmax default to the input grid's endpoints but can be set
+            # explicitly: rmin ~ 1e-5 is more robust than the common 1e-6, which
+            # over-concentrates points at tiny r and can starve the valence region.
+            rmin = grid[0] if rmin is None else rmin
+            rmax = grid[-1] if rmax is None else rmax
+            self.x_grid = np.linspace(np.log(rmin), np.log(rmax), len(grid))
             self.radial_grid = np.exp(self.x_grid)
         else:
             self.x_grid = None
