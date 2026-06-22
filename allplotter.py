@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot 2D and 3D orbital densities for any atom Z=1 to 28.
+Plot 2D and 3D orbital densities for any atom Z=1 to 28 (Z=1 to 54 with --exp-grid).
 
 Usage:
     python3 plot_orbitals.py 28        # Nickel, 2D
@@ -18,7 +18,7 @@ from scipy.integrate import simpson
 # Parse arguments
 # ============================================================
 parser = argparse.ArgumentParser(description='Atomic orbital visualizer')
-parser.add_argument('Z', type=int, help='Atomic number (1-28)')
+parser.add_argument('Z', type=int, help='Atomic number (1-28; up to 54 with --exp-grid)')
 parser.add_argument('--3d', dest='three_d', action='store_true', help='3D isosurface plot')
 parser.add_argument('--orbital', type=str, default=None, help='Plot specific orbital (e.g. 3d, 2p)')
 parser.add_argument('--grid', type=int, default=3000, help='Radial grid points (default 3000)')
@@ -44,6 +44,11 @@ parser.add_argument('--rmin', type=float, default=1e-6,
                          'try 1e-5 for robust heavy-atom exp-grid runs)')
 parser.add_argument('--rmax', type=float, default=15.0,
                     help='Outer radius of the radial grid in bohr (default 15.0)')
+parser.add_argument('--save_V', nargs='?', const='__AUTO__', default=None, metavar='FILE',
+                    help='Save the converged Veff (includes Vconf) and Vconf. Bare flag '
+                         'writes <elem>_potentials.npz; pass a path to choose the file. '
+                         'Requires --pseudoatom.')
+
 args = parser.parse_args()
 
 Z = args.Z
@@ -53,11 +58,16 @@ charge = args.charge
 assert 0 <= charge < Z, f"charge must satisfy 0 <= charge < Z={Z}"
 if args.exp_grid and args.original:
     parser.error("--exp-grid is only supported by the optimized solver (not --original)")
+if args.save_V and not args.pseudoatom:
+    parser.error("--save_V requires --pseudoatom (Vconf only exists for a confined atom)")
 
 element_names = {
     1:'H', 2:'He', 3:'Li', 4:'Be', 5:'B', 6:'C', 7:'N', 8:'O', 9:'F', 10:'Ne',
     11:'Na', 12:'Mg', 13:'Al', 14:'Si', 15:'P', 16:'S', 17:'Cl', 18:'Ar',
-    19:'K', 20:'Ca', 21:'Sc', 22:'Ti', 23:'V', 24:'Cr', 25:'Mn', 26:'Fe', 27:'Co', 28:'Ni'
+    19:'K', 20:'Ca', 21:'Sc', 22:'Ti', 23:'V', 24:'Cr', 25:'Mn', 26:'Fe', 27:'Co', 28:'Ni',
+    29:'Cu', 30:'Zn', 31:'Ga', 32:'Ge', 33:'As', 34:'Se', 35:'Br', 36:'Kr',
+    37:'Rb', 38:'Sr', 39:'Y', 40:'Zr', 41:'Nb', 42:'Mo', 43:'Tc', 44:'Ru',
+    45:'Rh', 46:'Pd', 47:'Ag', 48:'Cd', 49:'In', 50:'Sn', 51:'Sb', 52:'Te', 53:'I', 54:'Xe'
 }
 elem = element_names.get(Z, f"Z={Z}")
 
@@ -107,6 +117,11 @@ R_COV = {
     13: 2.287, 14: 2.098, 15: 2.022, 16: 1.984, 17: 1.928, 18: 2.003,
     19: 3.836, 20: 3.326, 21: 3.213, 22: 3.024, 23: 2.891, 24: 2.627,
     25: 2.627, 26: 2.494, 27: 2.381, 28: 2.343,
+    29: 2.494, 30: 2.305, 31: 2.305, 32: 2.268, 33: 2.249, 34: 2.268,
+    35: 2.268, 36: 2.192, 37: 4.157, 38: 3.685, 39: 3.590, 40: 3.307,
+    41: 3.099, 42: 2.910, 43: 2.778, 44: 2.759, 45: 2.683, 46: 2.627,
+    47: 2.740, 48: 2.721, 49: 2.683, 50: 2.627, 51: 2.627, 52: 2.608,
+    53: 2.627, 54: 2.646,
 }
 
 if args.pseudoatom:
@@ -115,13 +130,24 @@ if args.pseudoatom:
     r0 = 2 * R_COV[Z]
     print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr")
     dft = AtomicDFT(r, Z, charge=charge, r0=r0, exp_grid=args.exp_grid,
-                    rmin=args.rmin, rmax=args.rmax)
+                    rmin=args.rmin, rmax=args.rmax, save_V=args.save_V)
     r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
     old_stdout = sys.stdout; sys.stdout = io.StringIO()
-    evals, WF_final, rho = dft.GetKohnShamEquation(WF)
+    if args.save_V:
+        evals, WF_final, rho, Veff, Vconf = dft.GetKohnShamEquation(WF)
+    else:
+        evals, WF_final, rho = dft.GetKohnShamEquation(WF)
     sys.stdout = old_stdout
+
+    if args.save_V:
+        # Converged effective potential (includes Vconf) and the confinement
+        # term alone, on the canonical radial grid, for downstream DFTB use.
+        vfname = f'{elem}_potentials' if args.save_V == '__AUTO__' else args.save_V
+        vfname = vfname if vfname.endswith('.npz') else vfname + '.npz'
+        np.savez(vfname, grid=r, Veff=Veff, Vconf=Vconf, Z=Z, r0=r0, charge=dft.charge)
+        print(f"Saved Veff and Vconf to {vfname}")
 
 if args.save:
     fname = args.save if args.save.endswith('.npz') else args.save + '.npz'
@@ -202,7 +228,6 @@ if args.orbital:
     else:
         print(f"Orbital '{args.orbital}' not found. Available: {list(wf_dict.keys())}")
         sys.exit(1)
-
 # ============================================================
 # Spherical harmonics
 # ============================================================

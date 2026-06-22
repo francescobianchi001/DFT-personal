@@ -94,7 +94,7 @@ class AtomicDFT:
     MAX_Z_EXP = 54  # exponential grid verified to Xe; beyond this the deep-state
                     # bracketing fails (Au Z=79 cannot bracket the 1s), not the grid
 
-    def __init__(self, grid, Z, charge=0, r0=None, exp_grid=False, rmin=None, rmax=None):
+    def __init__(self, grid, Z, charge=0, r0=None, exp_grid=False, rmin=None, rmax=None, save_V=False):
         cap = self.MAX_Z_EXP if exp_grid else self.MAX_Z
         if Z > cap:
             raise ValueError(
@@ -110,6 +110,9 @@ class AtomicDFT:
         self.charge = charge
         self.N_e = Z - charge   # electron count (drives aufbau filling)
         self.exp_grid = exp_grid
+        self.save_V = save_V
+        self.Vconf = None   # set by get_Vconf() when the atom is confined (r0 set)
+        self.Veff = None    # converged effective potential, stored by run_SCF()
         if exp_grid:
             # Exponential radial grid. x = ln(r) is the uniform integration
             # variable (constant step -> standard Numerov); r = exp(x) is the
@@ -283,6 +286,7 @@ class AtomicDFT:
         if r0 is None:
             r0 = self.r0
         Vconf = (self.radial_grid/r0)**2
+        self.Vconf=Vconf
         return Vconf
 
     def getEffectivePotential(self, rho):
@@ -494,6 +498,9 @@ class AtomicDFT:
             WF = [[wf.copy() for wf in shell] for shell in WF_next]
             Rho_old = Rho_mixed.copy()
             if delta <= treshold: break
+        # Store the converged effective potential (includes Vconf when confined)
+        # so callers can save it for downstream use (e.g. DFTB).
+        self.Veff = Veff_mixed
         return eigenvalues_next, WF_next
     
     def GetKohnShamEquation(self, WF=None):
@@ -546,6 +553,12 @@ class AtomicDFT:
                 eigenvalues[nshell - 1].append(E_f)
         if self.CONTROLL:
             print(f"First pass eigenvalues: {eigenvalues}")
+        if self.save_V:
+            eigenvalues, WF_final = self.run_SCF(eigenvalues, WF_init, Veff)
+            Rho = self.getRadialDensity(WF_final)
+            # self.Veff is the converged potential from run_SCF (includes Vconf
+            # when confined); self.Vconf is the confinement term alone.
+            return eigenvalues, WF_final, Rho, self.Veff, self.Vconf
         eigenvalues, WF_final = self.run_SCF(eigenvalues, WF_init, Veff)
         Rho = self.getRadialDensity(WF_final)
         return eigenvalues, WF_final, Rho
