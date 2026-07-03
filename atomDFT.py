@@ -94,7 +94,7 @@ class AtomicDFT:
     MAX_Z_EXP = 54  # exponential grid verified to Xe; beyond this the deep-state
                     # bracketing fails (Au Z=79 cannot bracket the 1s), not the grid
 
-    def __init__(self, grid, Z, charge=0, r0=None, exp_grid=False, rmin=None, rmax=None, save_V=False):
+    def __init__(self, grid, Z, charge=0, r0=None, exp_grid=False, rmin=None, rmax=None, save_V=False,VO=None, LB94=False):
         cap = self.MAX_Z_EXP if exp_grid else self.MAX_Z
         if Z > cap:
             raise ValueError(
@@ -113,13 +113,9 @@ class AtomicDFT:
         self.save_V = save_V
         self.Vconf = None   # set by get_Vconf() when the atom is confined (r0 set)
         self.Veff = None    # converged effective potential, stored by run_SCF()
+        self.VO = VO
+        self.LB94 = LB94
         if exp_grid:
-            # Exponential radial grid. x = ln(r) is the uniform integration
-            # variable (constant step -> standard Numerov); r = exp(x) is the
-            # physical radius used by all downstream code via self.radial_grid.
-            # rmin/rmax default to the input grid's endpoints but can be set
-            # explicitly: rmin ~ 1e-5 is more robust than the common 1e-6, which
-            # over-concentrates points at tiny r and can starve the valence region.
             rmin = grid[0] if rmin is None else rmin
             rmax = grid[-1] if rmax is None else rmax
             self.x_grid = np.linspace(np.log(rmin), np.log(rmax), len(grid))
@@ -198,7 +194,10 @@ class AtomicDFT:
             occ_max = 2 * (2 * l + 1)
             remaining -= min(remaining, occ_max)
             max_n = max(max_n, n)
-        self.nshells = max_n
+        if self.VO is not None:
+            self.nshells = max_n + self.VO
+        else:
+            self.nshells = max_n
 
         # Initialize empty lists for each shell
         self.occupied = [[] for _ in range(self.nshells)]
@@ -235,6 +234,18 @@ class AtomicDFT:
             shell_l_added[idx].insert(insert_pos, l)
 
             remaining -= occ
+
+        if self.VO is not None:
+            for n in range(max_n + 1, self.nshells + 1):
+                idx = n - 1
+                for l in range(n):                 # full shell: l = 0 .. n-1
+                    E = self._get_screened_energy(n, l)
+                    radial = self._slater_radial(n, l, r, E)
+                    radial = radial / np.sqrt(simpson(radial**2, x=self.radial_grid))
+                    self.occupied[idx].append(0)
+                    self.E_start[idx].append(E)
+                    self.radial_WF[idx].append(radial)
+                    shell_l_added[idx].append(l)
 
         return self.radial_WF
     
@@ -288,9 +299,23 @@ class AtomicDFT:
         Vconf = (self.radial_grid/r0)**2
         self.Vconf=Vconf
         return Vconf
+    
+    def getV_LB94(self,RHO):
+        RHO = RHO / 2                       # spin channel rho_sigma (closed shell); no in-place edit
+        RHO = np.maximum(RHO, 1e-10)        # floored region: drho=0 -> x=0 -> Vcorr=0
+        drho = np.abs(np.gradient(RHO,self.radial_grid))
+        x = drho/RHO**(4/3)
+        ß = 0.05
+        sinh_m = np.log(x + np.sqrt(1+ x**2))
+        F_x = -x**2 * ß * (1 + 3*ß*x*sinh_m)**-1
+        Vcorr = RHO**(1/3)*F_x
+        return Vcorr
 
     def getEffectivePotential(self, rho):
         Vxc = self.getVXC(rho); Vh = self.getHartreePotential(rho); Ven = self.getNuclearPotential()
+        if self.LB94:
+            Vcorr = self.getV_LB94(rho)
+            Vxc += Vcorr
         Veff = Vxc + Vh + Ven
         if self.r0 is not None:
             Veff += self.get_Vconf()
@@ -459,6 +484,13 @@ class AtomicDFT:
 
     def run_SCF(self, eigenvalues, WF, Veff, max_iter=200, treshold=1e-6):
         eigenvalues_old = [[e for e in shell] for shell in eigenvalues]
+        # Guard against silent staleness: an occupied orbital whose bracket fails
+        # in EVERY iteration keeps its first-pass value and would flow into the
+        # DFTB tables unnoticed (the per-iteration warning is CONTROLL-gated and
+        # stdout may be redirected). Transient failures are fine.
+        never_solved = {(n, l) for n in range(1, self.nshells + 1)
+                        for l in range(len(self.occupied[n-1]))
+                        if self.occupied[n-1][l] != 0}
         Rho_old = self.getRadialDensity(WF)
         Veff_mixed = Veff.copy()
         for iteration in range(max_iter):
@@ -488,6 +520,7 @@ class AtomicDFT:
                     E_f, WF_f = self.getEigenValue(Bracket, Veff_next, lshell)
                     WF_next[nshell - 1].append(WF_f)
                     eigenvalues_next[nshell - 1].append(E_f)
+                    never_solved.discard((nshell, lshell))
             self.eigenvalues = eigenvalues_next
             flat_next = np.array([e for shell in eigenvalues_next for e in shell])
             flat_old = np.array([e for shell in eigenvalues_old for e in shell])
@@ -498,6 +531,33 @@ class AtomicDFT:
             WF = [[wf.copy() for wf in shell] for shell in WF_next]
             Rho_old = Rho_mixed.copy()
             if delta <= treshold: break
+        if never_solved:
+            bad = ", ".join(f"n={n},l={l}" for n, l in sorted(never_solved))
+            raise RuntimeError(
+                f"SCF ended but occupied orbital(s) {bad} were never re-solved: "
+                f"bracket failed in every iteration, values are stale first-pass "
+                f"guesses. Check grid/rmax (confined atoms overflow for large rmax).")
+        # Virtual (occ = 0) orbitals: solved once in the converged potential.
+        # They never entered the density or the SCF convergence test (the loop
+        # above skips occ == 0), so this cannot perturb the ground state; it only
+        # fills in their confined eigenvalues/orbitals for the DFTB basis. A
+        # virtual that cannot be bracketed is simply left at 0 / zeros.
+        for nshell in range(1, self.nshells + 1):
+            for lshell in range(len(self.occupied[nshell-1])):
+                if self.occupied[nshell-1][lshell] != 0:
+                    continue
+                Veff_v = Veff_mixed + self.Vr[nshell - 1][lshell]
+                # Confined virtuals bracket fine from the screened guess. Free-atom
+                # virtuals are weakly bound just below threshold, where the coarse
+                # step + the e>=0 cutoff skip them -- seed from -eps and walk down.
+                seed = self.E_start[nshell - 1][lshell] if self.r0 is not None else -1e-3
+                Bracket = self.getBracketEnergy(seed, Veff_v, nshell, lshell)
+                if Bracket is None:
+                    continue
+                E_f, WF_f = self.getEigenValue(Bracket, Veff_v, lshell)
+                eigenvalues_next[nshell-1][lshell] = E_f
+                WF_next[nshell-1][lshell] = WF_f
+
         # Store the converged effective potential (includes Vconf when confined)
         # so callers can save it for downstream use (e.g. DFTB).
         self.Veff = Veff_mixed

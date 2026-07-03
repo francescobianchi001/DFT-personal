@@ -48,6 +48,13 @@ parser.add_argument('--save_V', nargs='?', const='__AUTO__', default=None, metav
                     help='Save the converged Veff (includes Vconf) and Vconf. Bare flag '
                          'writes <elem>_potentials.npz; pass a path to choose the file. '
                          'Requires --pseudoatom.')
+parser.add_argument('--VO', type=int, default=None, metavar='N',
+                    help='Also solve N virtual (unoccupied) shells above the highest '
+                         'occupied one. They carry occ=0 in the saved "occupied" list but '
+                         'get real eigenvalues/orbitals, to enrich the downstream DFTB basis.')
+parser.add_argument('--LB94', action='store_true',
+                    help='Add the LB94 gradient correction to Vxc (restores the -1/r tail '
+                         'so free-atom virtual orbitals become bound and brackettable).')
 
 args = parser.parse_args()
 
@@ -101,7 +108,7 @@ else:
     print(f"Running KS-LDA for {label} (Z={Z}, charge={charge})...")
     r = np.linspace(args.rmin, args.rmax, args.grid)
     dft = AtomicDFT(r, Z, charge=charge, exp_grid=args.exp_grid,
-                    rmin=args.rmin, rmax=args.rmax)
+                    rmin=args.rmin, rmax=args.rmax, VO=args.VO, LB94=args.LB94)
     r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
@@ -130,7 +137,8 @@ if args.pseudoatom:
     r0 = 2 * R_COV[Z]
     print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr")
     dft = AtomicDFT(r, Z, charge=charge, r0=r0, exp_grid=args.exp_grid,
-                    rmin=args.rmin, rmax=args.rmax, save_V=args.save_V)
+                    rmin=args.rmin, rmax=args.rmax, save_V=args.save_V, VO=args.VO,
+                    LB94=args.LB94)
     r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
     dft.CONTROLL = False
     WF = dft.GetOrbitals()
@@ -164,6 +172,7 @@ if args.save:
 # Build orbital dictionary
 wf_dict = {}
 eval_dict = {}
+occ_dict = {}
 for i, shell in enumerate(WF_final):
     for j, wf in enumerate(shell):
         n = i + 1
@@ -172,10 +181,14 @@ for i, shell in enumerate(WF_final):
         if isinstance(wf, np.ndarray) and np.any(wf != 0):
             wf_dict[label] = (n, l, wf)
             eval_dict[label] = evals[i][j]
+            occ_dict[label] = dft.occupied[n - 1][l]
 
 print(f"Converged orbitals for {elem}:")
 for label in wf_dict:
-    print(f"  {label}: {eval_dict[label]:.6f} Ha")
+    n, l, _ = wf_dict[label]
+    occ = dft.occupied[n - 1][l]
+    tag = '' if occ > 0 else '   (virtual, occ=0)'
+    print(f"  {label}: {eval_dict[label]:.6f} Ha{tag}")
 
 # ============================================================
 # Energy output
@@ -225,6 +238,7 @@ if args.orbital:
     if args.orbital in wf_dict:
         wf_dict = {args.orbital: wf_dict[args.orbital]}
         eval_dict = {args.orbital: eval_dict[args.orbital]}
+        occ_dict = {args.orbital: occ_dict[args.orbital]}
     else:
         print(f"Orbital '{args.orbital}' not found. Available: {list(wf_dict.keys())}")
         sys.exit(1)
@@ -310,7 +324,8 @@ def plot_2d(wf_dict, eval_dict):
         ax.set_aspect('equal')
         ax.set_facecolor('black')
         e_str = f"{eval_dict[label]:.4f}" if label in eval_dict else ""
-        ax.set_title(f"{label}  ({e_str} Ha)", color='#88aaff', fontsize=13, fontweight='bold')
+        vtag = "  [virtual]" if occ_dict.get(label, 1) == 0 else ""
+        ax.set_title(f"{label}  ({e_str} Ha){vtag}", color='#88aaff', fontsize=13, fontweight='bold')
         ax.set_xlabel('x (bohr)', color='#555', fontsize=8)
         ax.set_ylabel('z (bohr)', color='#555', fontsize=8)
         ax.tick_params(colors='#444', labelsize=7)
@@ -396,7 +411,8 @@ def plot_3d(wf_dict, eval_dict):
                       s=1, alpha=0.3)
 
         e_str = f"{eval_dict[label]:.4f}" if label in eval_dict else ""
-        ax.set_title(f"{label} ({e_str} Ha)", color='#88aaff', fontsize=12, pad=0)
+        vtag = " [virtual]" if occ_dict.get(label, 1) == 0 else ""
+        ax.set_title(f"{label} ({e_str} Ha){vtag}", color='#88aaff', fontsize=12, pad=0)
         ax.set_xlim(-rmax, rmax)
         ax.set_ylim(-rmax, rmax)
         ax.set_zlim(-rmax, rmax)
