@@ -236,6 +236,28 @@ class AtomicDFT:
             remaining -= occ
 
         if self.VO is not None:
+            # Complete partially filled shells with occ=0 virtuals: the aufbau
+            # loop breaks once all electrons are placed, so e.g. Li/Be never
+            # get a 2p entry. Filling every missing l also keeps the shell
+            # lists contiguous in l (index == l), which self.Vr indexing needs.
+            for n in range(1, max_n + 1):
+                idx = n - 1
+                for l in range(n):
+                    if l in shell_l_added[idx]:
+                        continue
+                    E = self._get_screened_energy(n, l)
+                    radial = self._slater_radial(n, l, r, E)
+                    radial = radial / np.sqrt(simpson(radial**2, x=self.radial_grid))
+                    insert_pos = 0
+                    for existing_l in shell_l_added[idx]:
+                        if existing_l < l:
+                            insert_pos += 1
+                        else:
+                            break
+                    self.occupied[idx].insert(insert_pos, 0)
+                    self.E_start[idx].insert(insert_pos, E)
+                    self.radial_WF[idx].insert(insert_pos, radial)
+                    shell_l_added[idx].insert(insert_pos, l)
             for n in range(max_n + 1, self.nshells + 1):
                 idx = n - 1
                 for l in range(n):                 # full shell: l = 0 .. n-1

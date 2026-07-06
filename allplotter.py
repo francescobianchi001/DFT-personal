@@ -87,7 +87,7 @@ if args.original:
 else:
     from atomDFT import AtomicDFT
 
-l_names = 'spdf'
+l_names = 'spdfghi'
 
 if args.load:
     print(f"Loading data from {args.load}...")
