@@ -55,6 +55,19 @@ parser.add_argument('--VO', type=int, default=None, metavar='N',
 parser.add_argument('--LB94', action='store_true',
                     help='Add the LB94 gradient correction to Vxc (restores the -1/r tail '
                          'so free-atom virtual orbitals become bound and brackettable).')
+parser.add_argument('--r0', dest='r0', type=float, default=None, metavar='R0',
+                    help='Override the valence confinement radius (bohr). Default is '
+                         '2*r_cov; use this to tune the DFTB off-diagonal (bonding).')
+parser.add_argument('--r0-VO', dest='r0_VO', type=float, default=None, metavar='R0',
+                    help='Weaker confinement radius (bohr) applied only to the virtual '
+                         '(occ=0) shells from --VO; occupied shells keep r0=2*r_cov. Runs '
+                         'a second confined solve and combines the two: valence WFs from '
+                         'r0, virtual WFs from r0_VO. Both Vconf are saved with --save_V.')
+parser.add_argument('--VO-keep', dest='VO_keep', type=str, default=None, metavar='LS',
+                    help="Keep only the virtual (--VO) shells with these l when saving: "
+                         "l-letters ('d', 'sd') or numbers ('2', '0,2'); the rest are "
+                         "zeroed. Use to keep only virtuals with no valence partner "
+                         "(e.g. d), avoiding on-site non-orthogonality in DFTB.")
 
 args = parser.parse_args()
 
@@ -132,41 +145,105 @@ R_COV = {
 }
 
 if args.pseudoatom:
-    if Z not in R_COV:
-        parser.error(f"--pseudoatom needs a covalent radius for Z={Z}; R_COV only covers Z<=28")
-    r0 = 2 * R_COV[Z]
-    print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr")
-    dft = AtomicDFT(r, Z, charge=charge, r0=r0, exp_grid=args.exp_grid,
-                    rmin=args.rmin, rmax=args.rmax, save_V=args.save_V, VO=args.VO,
-                    LB94=args.LB94)
-    r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
-    dft.CONTROLL = False
-    WF = dft.GetOrbitals()
-    old_stdout = sys.stdout; sys.stdout = io.StringIO()
-    if args.save_V:
-        evals, WF_final, rho, Veff, Vconf = dft.GetKohnShamEquation(WF)
+    if args.r0 is not None:
+        r0 = args.r0                       # explicit override (r_c tuning)
     else:
-        evals, WF_final, rho = dft.GetKohnShamEquation(WF)
-    sys.stdout = old_stdout
+        if Z not in R_COV:
+            parser.error(f"--pseudoatom needs a covalent radius for Z={Z}; R_COV only covers Z<=28")
+        r0 = 2 * R_COV[Z]
+    split = args.r0_VO is not None
+    if split and not args.VO:
+        parser.error("--r0-VO requires --VO N (no virtual shells to re-confine otherwise)")
+    print(f"Solving confined pseudo-atom: r0 = 2*r_cov = {r0:.3f} bohr"
+          + (f"; virtuals re-confined at r0_VO = {args.r0_VO:.3f} bohr" if split else ""))
+
+    def _confined(r0_use, need_V):
+        d = AtomicDFT(r, Z, charge=charge, r0=r0_use, exp_grid=args.exp_grid,
+                      rmin=args.rmin, rmax=args.rmax, save_V=need_V, VO=args.VO,
+                      LB94=args.LB94)
+        d.CONTROLL = False
+        wf = d.GetOrbitals()
+        so = sys.stdout; sys.stdout = io.StringIO()
+        res = d.GetKohnShamEquation(wf)
+        sys.stdout = so
+        return d, res
+
+    need_V = bool(args.save_V) or split
+    dft, res = _confined(r0, need_V)
+    r = dft.radial_grid   # canonical grid the WFs live on (exponential if requested)
+    if need_V:
+        evals, WF_final, rho, Veff, Vconf = res
+    else:
+        evals, WF_final, rho = res
+
+    Vconf_VO = None
+    vo_shells = []
+    if split:
+        # Second solve at the weaker wall; swap its orbitals into the virtual
+        # (occ=0) slots. Occupied shells, rho and Veff stay from the r0 solve.
+        # vo_shells records which (n,l) got the VO wall, for the DFTB off-diagonal.
+        _, res_vo = _confined(args.r0_VO, True)
+        evals_vo, WF_vo, _, _, Vconf_VO = res_vo
+        for ni in range(len(dft.occupied)):
+            for l in range(len(dft.occupied[ni])):
+                w = WF_vo[ni][l] if ni < len(WF_vo) and l < len(WF_vo[ni]) else None
+                if dft.occupied[ni][l] == 0 and isinstance(w, np.ndarray) and np.any(w != 0):
+                    WF_final[ni][l] = w
+                    evals[ni][l] = evals_vo[ni][l]
+                    vo_shells.append([ni, l])
+        print(f"  combined: occupied shells from r0={r0:.3f}, "
+              f"virtual shells from r0_VO={args.r0_VO:.3f}")
 
     if args.save_V:
-        # Converged effective potential (includes Vconf) and the confinement
-        # term alone, on the canonical radial grid, for downstream DFTB use.
+        # Converged Veff (includes Vconf) and the confinement term(s) alone, on
+        # the canonical radial grid, for the downstream DFTB off-diagonal.
         vfname = f'{elem}_potentials' if args.save_V == '__AUTO__' else args.save_V
         vfname = vfname if vfname.endswith('.npz') else vfname + '.npz'
-        np.savez(vfname, grid=r, Veff=Veff, Vconf=Vconf, Z=Z, r0=r0, charge=dft.charge)
-        print(f"Saved Veff and Vconf to {vfname}")
+        Vdict = dict(grid=r, Veff=Veff, Vconf=Vconf, Z=Z, r0=r0, charge=dft.charge)
+        if split:
+            Vdict.update(Vconf_VO=Vconf_VO, r0_VO=args.r0_VO,
+                         vo_shells=np.array(vo_shells, dtype=int).reshape(-1, 2))
+        np.savez(vfname, **Vdict)
+        print(f"Saved Veff and Vconf to {vfname}" + (" (+ Vconf_VO)" if split else ""))
+
+if args.VO is not None and args.VO_keep is not None:
+    # Keep only selected-l virtual shells; zero the rest so the downstream
+    # basis skips them (occupied shells are never touched).
+    _lmap = {'s': 0, 'p': 1, 'd': 2, 'f': 3, 'g': 4, 'h': 5}
+    keep_l = set()
+    for tok in args.VO_keep.replace(',', ' ').split():
+        tok = tok.strip().lower()
+        if tok.isdigit():
+            keep_l.add(int(tok))
+        elif tok and all(c in _lmap for c in tok):
+            keep_l.update(_lmap[c] for c in tok)
+        else:
+            parser.error(f"--VO-keep: cannot parse '{tok}' (use l-letters spdf or numbers)")
+    dropped = []
+    for ni in range(len(dft.occupied)):
+        for l in range(len(dft.occupied[ni])):
+            if dft.occupied[ni][l] == 0 and l not in keep_l:
+                w = WF_final[ni][l]
+                if isinstance(w, np.ndarray) and np.any(w != 0):
+                    WF_final[ni][l] = np.zeros_like(r)
+                    evals[ni][l] = 0.0
+                    dropped.append(f"{ni + 1}{l_names[l]}")
+    if dropped:
+        print(f"VO-keep: zeroed virtual shells {', '.join(dropped)} (kept l={sorted(keep_l)})")
 
 if args.save:
     fname = args.save if args.save.endswith('.npz') else args.save + '.npz'
-    np.savez(fname,
-             grid=r,
-             rho=rho,
-             eigenvalues=np.array(evals, dtype=object),
-             occupied=np.array(dft.occupied, dtype=object),
-             wavefunctions=np.array(WF_final, dtype=object),
-             Z=Z,
-             charge=dft.charge)
+    save_kw = dict(grid=r, rho=rho,
+                   eigenvalues=np.array(evals, dtype=object),
+                   occupied=np.array(dft.occupied, dtype=object),
+                   wavefunctions=np.array(WF_final, dtype=object),
+                   Z=Z, charge=dft.charge)
+    if not args.pseudoatom:
+        # plain-LDA neutral effective potential (no LB94, no Vconf) = Vneutral for
+        # the DFTB density/wavefunction split. LB94 stays a diagonal-only device.
+        save_kw['Veff'] = (dft.getVXC(rho) + dft.getHartreePotential(rho)
+                           + dft.getNuclearPotential())
+    np.savez(fname, **save_kw)
     print(f"Saved data to {fname}")
 
 # Build orbital dictionary
